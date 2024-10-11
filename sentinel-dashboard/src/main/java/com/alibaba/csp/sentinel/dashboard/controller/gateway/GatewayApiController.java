@@ -26,10 +26,14 @@ import com.alibaba.csp.sentinel.dashboard.domain.vo.gateway.api.AddApiReqVo;
 import com.alibaba.csp.sentinel.dashboard.domain.vo.gateway.api.ApiPredicateItemVo;
 import com.alibaba.csp.sentinel.dashboard.domain.vo.gateway.api.UpdateApiReqVo;
 import com.alibaba.csp.sentinel.dashboard.repository.gateway.InMemApiDefinitionStore;
+import com.alibaba.csp.sentinel.dashboard.rule.DynamicRuleProvider;
+import com.alibaba.csp.sentinel.dashboard.rule.DynamicRulePublisher;
 import com.alibaba.csp.sentinel.util.StringUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.util.CollectionUtils;
 import org.springframework.web.bind.annotation.*;
 
@@ -56,6 +60,16 @@ public class GatewayApiController {
     @Autowired
     private SentinelApiClient sentinelApiClient;
 
+    @Autowired
+    @Qualifier("gatewayApiRuleNacosProvider")
+    private DynamicRuleProvider<List<ApiDefinitionEntity>> ruleNacosProvider;
+    @Autowired
+    @Qualifier("gatewayApiRuleNacosPublisher")
+    private DynamicRulePublisher<List<ApiDefinitionEntity>> ruleNacosPublisher;
+
+    @Value("${nacos.server.enabled:false}")
+    private boolean nacosServerEnabled;
+
     @GetMapping("/list.json")
     @AuthAction(AuthService.PrivilegeType.READ_RULE)
     public Result<List<ApiDefinitionEntity>> queryApis(String app, String ip, Integer port) {
@@ -71,7 +85,12 @@ public class GatewayApiController {
         }
 
         try {
-            List<ApiDefinitionEntity> apis = sentinelApiClient.fetchApis(app, ip, port).get();
+            List<ApiDefinitionEntity> apis = new ArrayList<>();
+            if(nacosServerEnabled) {
+                apis = ruleNacosProvider.getRules(app);
+            } else {
+                apis = sentinelApiClient.fetchApis(app, ip, port).get();
+            }
             repository.saveAll(apis);
             return Result.ofSuccess(apis);
         } catch (Throwable throwable) {
@@ -156,10 +175,15 @@ public class GatewayApiController {
             return Result.ofThrowable(-1, throwable);
         }
 
-        if (!publishApis(app, ip, port)) {
-            logger.warn("publish gateway apis fail after add");
+        if(nacosServerEnabled) {
+            if (!publishApis(app)) {
+                logger.warn("publish gateway apis fail after add, app={}", app);
+            }
+        } else {
+            if (!publishApis(app, ip, port)) {
+                logger.warn("publish gateway apis fail after add");
+            }
         }
-
         return Result.ofSuccess(entity);
     }
 
@@ -219,10 +243,16 @@ public class GatewayApiController {
             return Result.ofThrowable(-1, throwable);
         }
 
-        if (!publishApis(app, entity.getIp(), entity.getPort())) {
-            logger.warn("publish gateway apis fail after update");
-        }
 
+        if(nacosServerEnabled) {
+            if (!publishApis(app)) {
+                logger.warn("publish gateway apis fail after update, app={}", app);
+            }
+        } else {
+            if (!publishApis(app, entity.getIp(), entity.getPort())) {
+                logger.warn("publish gateway apis fail after update");
+            }
+        }
         return Result.ofSuccess(entity);
     }
 
@@ -245,16 +275,31 @@ public class GatewayApiController {
             logger.error("delete gateway api error:", throwable);
             return Result.ofThrowable(-1, throwable);
         }
-
-        if (!publishApis(oldEntity.getApp(), oldEntity.getIp(), oldEntity.getPort())) {
-            logger.warn("publish gateway apis fail after delete");
+        if(nacosServerEnabled) {
+            if (!publishApis(oldEntity.getApp())) {
+                logger.warn("publish gateway apis fail after delete, app={}", oldEntity.getApp());
+            }
+        } else {
+            if (!publishApis(oldEntity.getApp(), oldEntity.getIp(), oldEntity.getPort())) {
+                logger.warn("publish gateway apis fail after delete");
+            }
         }
-
         return Result.ofSuccess(id);
     }
 
     private boolean publishApis(String app, String ip, Integer port) {
         List<ApiDefinitionEntity> apis = repository.findAllByMachine(MachineInfo.of(app, ip, port));
         return sentinelApiClient.modifyApis(app, ip, port, apis);
+    }
+
+    private boolean publishApis(String app) {
+        try {
+            List<ApiDefinitionEntity> rules = repository.findAllByApp(app);
+            ruleNacosPublisher.publish(app, rules);
+        } catch (Exception exception){
+            logger.warn(String.format("Publish gateway apis failed, app=%s", app), exception);
+            return false;
+        }
+        return true;
     }
 }

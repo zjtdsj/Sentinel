@@ -15,6 +15,7 @@
  */
 package com.alibaba.csp.sentinel.dashboard.controller;
 
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 
@@ -28,10 +29,14 @@ import com.alibaba.csp.sentinel.dashboard.datasource.entity.rule.SystemRuleEntit
 import com.alibaba.csp.sentinel.dashboard.discovery.MachineInfo;
 import com.alibaba.csp.sentinel.dashboard.client.SentinelApiClient;
 import com.alibaba.csp.sentinel.dashboard.domain.Result;
+import com.alibaba.csp.sentinel.dashboard.rule.DynamicRuleProvider;
+import com.alibaba.csp.sentinel.dashboard.rule.DynamicRulePublisher;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -51,6 +56,16 @@ public class SystemController {
     private SentinelApiClient sentinelApiClient;
     @Autowired
     private AppManagement appManagement;
+
+    @Autowired
+    @Qualifier("systemRuleNacosProvider")
+    private DynamicRuleProvider<List<SystemRuleEntity>> ruleNacosProvider;
+    @Autowired
+    @Qualifier("systemRuleNacosPublisher")
+    private DynamicRulePublisher<List<SystemRuleEntity>> ruleNacosPublisher;
+
+    @Value("${nacos.server.enabled:false}")
+    private boolean nacosServerEnabled;
 
     private <R> Result<R> checkBasicParams(String app, String ip, Integer port) {
         if (StringUtil.isEmpty(app)) {
@@ -80,7 +95,12 @@ public class SystemController {
             return checkResult;
         }
         try {
-            List<SystemRuleEntity> rules = sentinelApiClient.fetchSystemRuleOfMachine(app, ip, port);
+            List<SystemRuleEntity> rules = new ArrayList<>();
+            if(nacosServerEnabled) {
+                rules = ruleNacosProvider.getRules(app);
+            } else {
+                rules = sentinelApiClient.fetchSystemRuleOfMachine(app, ip, port);
+            }
             rules = repository.saveAll(rules);
             return Result.ofSuccess(rules);
         } catch (Throwable throwable) {
@@ -159,8 +179,14 @@ public class SystemController {
             logger.error("Add SystemRule error", throwable);
             return Result.ofThrowable(-1, throwable);
         }
-        if (!publishRules(app, ip, port)) {
-            logger.warn("Publish system rules fail after rule add");
+        if(nacosServerEnabled) {
+            if (!publishRules(app)) {
+                logger.warn("Publish system rules fail after rule add, app={}", app);
+            }
+        } else {
+            if (!publishRules(app, ip, port)) {
+                logger.warn("Publish system rules fail after rule add");
+            }
         }
         return Result.ofSuccess(entity);
     }
@@ -221,8 +247,14 @@ public class SystemController {
             logger.error("save error:", throwable);
             return Result.ofThrowable(-1, throwable);
         }
-        if (!publishRules(entity.getApp(), entity.getIp(), entity.getPort())) {
-            logger.info("publish system rules fail after rule update");
+        if(nacosServerEnabled) {
+            if (!publishRules(entity.getApp())) {
+                logger.warn("publish system rules fail after rule update, app={}", entity.getApp());
+            }
+        } else {
+            if (!publishRules(entity.getApp(), entity.getIp(), entity.getPort())) {
+                logger.info("publish system rules fail after rule update");
+            }
         }
         return Result.ofSuccess(entity);
     }
@@ -243,8 +275,14 @@ public class SystemController {
             logger.error("delete error:", throwable);
             return Result.ofThrowable(-1, throwable);
         }
-        if (!publishRules(oldEntity.getApp(), oldEntity.getIp(), oldEntity.getPort())) {
-            logger.info("publish system rules fail after rule delete");
+        if(nacosServerEnabled) {
+            if (!publishRules(oldEntity.getApp())) {
+                logger.warn("publish system rules fail after rule delete, app={}", oldEntity.getApp());
+            }
+        } else {
+            if (!publishRules(oldEntity.getApp(), oldEntity.getIp(), oldEntity.getPort())) {
+                logger.info("publish system rules fail after rule delete");
+            }
         }
         return Result.ofSuccess(id);
     }
@@ -252,5 +290,16 @@ public class SystemController {
     private boolean publishRules(String app, String ip, Integer port) {
         List<SystemRuleEntity> rules = repository.findAllByMachine(MachineInfo.of(app, ip, port));
         return sentinelApiClient.setSystemRuleOfMachine(app, ip, port, rules);
+    }
+
+    private boolean publishRules(String app) {
+        try {
+            List<SystemRuleEntity> rules = repository.findAllByApp(app);
+            ruleNacosPublisher.publish(app, rules);
+        } catch (Exception exception){
+            logger.warn(String.format("Publish system rules failed, app=%s", app), exception);
+            return false;
+        }
+        return true;
     }
 }
