@@ -28,12 +28,6 @@ public class InterceptorConfig implements WebMvcConfigurer {
         // Add to the interceptor list.
         registry.addInterceptor(new SentinelWebInterceptor(config)).addPathPatterns("/**");
     }
-
-    @Bean
-    public SentinelExceptionAware sentinelExceptionAware(){
-        //Make exception visible to Sentinel if you have configured ExceptionHandler
-        return new SentinelExceptionAware();
-    }
 }
 ```
 
